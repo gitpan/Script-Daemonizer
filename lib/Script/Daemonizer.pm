@@ -18,7 +18,7 @@ use File::Basename ();
     restart
 );
 
-$Script::Daemonizer::VERSION = '0.91.00';
+$Script::Daemonizer::VERSION = '0.91.01';
 
 # ------------------------------------------------------------------------------
 # 'Private' vars
@@ -241,6 +241,11 @@ sub _manage_stdhandles {
     # name the filehandles I'm acting upon: they're called STDOUT (1) and
     # STDERR (2)
     my %keep = map { $_ => 1 } @$keep;
+
+    # Return immediately if we have nothing to do:
+    return 1 if ( 
+        ($keep{1} or $keep{'STDOUT'}) && ($keep{2} or $keep{'STDERR'}) 
+    );
 
     # If we were not requested to tie stdhandles, we may safely close them and
     # return now. 
