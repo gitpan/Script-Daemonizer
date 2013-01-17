@@ -21,8 +21,8 @@ requires:
   Carp: 0
   Fcntl: 0
   File::Basename: 0
-  File::Spec::Functions: 0
+  File::Spec: 0
   File::Temp: 0
   POSIX: 0
   Test::More: 0
-version: v0.90.00
+version: v0.91.00
