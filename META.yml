@@ -25,4 +25,4 @@ requires:
   File::Temp: 0
   POSIX: 0
   Test::More: 0
-version: v0.91.01
+version: v0.91.02
