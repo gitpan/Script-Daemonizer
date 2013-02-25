@@ -10,7 +10,7 @@ use FindBin ();
 use File::Spec;
 use File::Basename ();
 
-$Script::Daemonizer::VERSION = '0.93.01';
+$Script::Daemonizer::VERSION = '0.93.04';
 
 # ------------------------------------------------------------------------------
 # 'Private' vars
@@ -18,15 +18,24 @@ $Script::Daemonizer::VERSION = '0.93.01';
 my @argv_copy;
 my $devnull = File::Spec->devnull;
 my @daemon_options = ( qw{ 
+    chdir
     do_not_tie_stdhandles
     drop_privileges
     output_file
     pidfile
+    restart_on
+    setsid
+    sigunmask
     stdout_file
     stderr_file
 
     _DEBUG
 } );
+my $global_pidfh;
+my %defaults = (
+    working_dir => File::Spec->rootdir(),
+    umask       => 0,
+);
 
 
 
@@ -60,6 +69,23 @@ BEGIN {
 }
 
 
+
+################################################################################
+# HANDLING IMPORT TAGS
+################################################################################
+
+sub import {
+    my $class = shift;
+    for my $opt (@_) {
+        if ($opt eq ':NOCHDIR') {
+            delete $defaults{working_dir};
+        } elsif ($opt eq ':NOUMASK') {
+            delete $defaults{umask};
+        } else {
+            croak "Unknown tag: $opt";
+        }
+    }
+}
     
 
 
@@ -95,7 +121,8 @@ sub _set_umask {
 sub _fork {
     my $self = shift;
 
-    return unless $self->{fork};
+    return unless $self->{fork};    # Just in case, but already checked when 
+                                    # _fork() is called
 
     # See http://code.activestate.com/recipes/278731/ or the source of 
     # Proc::Daemon for a discussion on ignoring SIGHUP. 
@@ -103,8 +130,11 @@ sub _fork {
     # this to IGNORE anyway. 
     local $SIG{'HUP'} = 'IGNORE';
 
-    defined(my $pid = fork()) or croak "Cannot fork: $!";
+    defined(my $pid = fork()) 
+        or croak "Cannot fork: $!";
+
     exit 0 if $pid;     # parent exits here
+
     $self->{fork}--;
 
     $self->_debug("Forked, remaining forks: ", $self->{fork});
@@ -158,7 +188,10 @@ sub _write_pidfile {
     ++$|;
     select $prev;
 
-    return $self->{pidfh} = $fh;
+    # Save it as a global so that in short init syntax
+    #   Script::Daemonizer->new( pidfile => $pfile )->daemonize;
+    # it stays in scope
+    return $global_pidfh = $self->{pidfh} = $fh;
 }
 
 
@@ -269,6 +302,14 @@ sub _manage_stdhandles {
     
 }
 
+########################
+# sub _get_signal_list #
+########################
+sub _get_signal_list {
+    my $self = shift;
+
+}
+
 # ------------------------------------------------------------------------------
 # 'Public' functions
 # ------------------------------------------------------------------------------
@@ -319,17 +360,26 @@ sub new {
     croak "Odd number of arguments in configuration!"
         if @_ %2;
 
-    my $self = {};
+    my $self = {
+        %defaults,
+    };
 
     # Get the configuration
     my %params = @_;
 
     # Set useful defaults
     $self->{name}        = delete $params{name}        || (File::Spec->splitpath($0))[-1];
-    $self->{umask}       = delete $params{umask}       || 0;
-    $self->{working_dir} = delete $params{working_dir} || File::Spec->rootdir();
-    $self->{fork}        = (exists $params{fork} && $params{fork} =~ /^[012]$/) ? 
-                             delete $params{fork}         : 2;
+    $self->{fork}        = (exists $params{fork} && $params{fork} =~ /^[012]$/)
+                            ? delete $params{fork}
+                            : 2;
+
+    $self->{working_dir} = delete $params{working_dir} if $params{working_dir};
+
+    if (exists $params{umask}) {
+        croak "Invalid umask specified: ", $params{umask}
+            unless $params{umask} =~ /^[0-7]{1,3}$/;
+        $self->{umask} = delete $params{umask};
+    }
 
     # Get other options as they are:
     for (@daemon_options) {
@@ -343,7 +393,25 @@ sub new {
             if @extra_args;
     }
 
-    return bless $self, $pkg; 
+    bless $self, $pkg;
+
+    # Set up signal handlers
+    if ($self->{restart_on} && ref $self->{restart_on} eq 'ARRAY') {
+        my @sigs = @{ $self->{restart_on} };
+        for (@sigs) {
+            $SIG{ $_ } = sub {
+                $self->restart();
+            };
+        }
+        $self->sigunmask( @sigs );
+    }
+
+    # Unmask signals if requested
+    if ($self->{sigunmask} && ref $self->{sigunmask} eq 'ARRAY') {
+        $self->sigunmask(@{ $self->{sigunmask} });
+    }
+
+    return $self;
 
 }
 
@@ -359,16 +427,19 @@ sub daemonize {
         if $self->{pidfile};
 
     # Step 1.
-    $self->_set_umask;
+    $self->_set_umask
+        if exists $self->{umask};
 
     # Step 2.
-    $self->_fork();
+    $self->_fork()
+        if $self->{fork};
 
     # Step 3.
     $self->_setsid();
 
     # Step 4.
-    $self->_fork();
+    $self->_fork()
+        if $self->{fork};
     
     #
     # Step 4.5 - OPTIONAL: if pidfile is in use, now it's the moment to dump our
@@ -396,7 +467,8 @@ sub daemonize {
     }
 
     # Step 5.
-    $self->_chdir();
+    $self->_chdir()
+        if $self->{working_dir};
 
 
     # Step 6.
@@ -451,7 +523,7 @@ sub sigunmask {
     # SIGQUIT
     # POSIX::QUIT
     # POSIX::SIGQUIT
-    my @sigs = map { 
+    my @sigs =  map { 
         ( my $signal = $_ ) =~ s/^POSIX:://;
         $signal =~ s/^SIG//;
         $signal = "POSIX::SIG".$signal;
